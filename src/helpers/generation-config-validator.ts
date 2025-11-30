@@ -8,6 +8,78 @@ import {
 import { ChatCompletionRequest, Env, EffortLevel, SafetyThreshold } from "../types";
 import { NativeToolsConfiguration } from "../types/native-tools";
 
+// Keys that Gemini API does not support and should be removed from tool parameters
+const UNSUPPORTED_SCHEMA_KEYS = [
+	"$schema",
+	"$id",
+	"$ref",
+	"$defs",
+	"$comment",
+	"const",
+	"anyOf",
+	"oneOf",
+	"allOf",
+	"not",
+	"if",
+	"then",
+	"else",
+	"dependentSchemas",
+	"dependentRequired",
+	"additionalItems",
+	"unevaluatedItems",
+	"unevaluatedProperties",
+	"contentEncoding",
+	"contentMediaType",
+	"contentSchema",
+	"deprecated",
+	"readOnly",
+	"writeOnly",
+	"examples",
+	"default",
+	"definitions",
+	"strict"
+];
+
+/**
+ * Recursively sanitizes a JSON Schema object by removing unsupported keys for Gemini API.
+ * Also ensures 'required' array only contains fields that exist in 'properties'.
+ */
+function sanitizeSchemaForGemini(schema: unknown): unknown {
+	if (schema === null || schema === undefined) {
+		return schema;
+	}
+
+	if (Array.isArray(schema)) {
+		return schema.map((item) => sanitizeSchemaForGemini(item));
+	}
+
+	if (typeof schema === "object") {
+		const schemaObj = schema as Record<string, unknown>;
+		const sanitized: Record<string, unknown> = {};
+
+		for (const [key, value] of Object.entries(schemaObj)) {
+			// Skip unsupported keys
+			if (UNSUPPORTED_SCHEMA_KEYS.includes(key) || key.startsWith("$")) {
+				continue;
+			}
+
+			// Recursively sanitize nested objects
+			sanitized[key] = sanitizeSchemaForGemini(value);
+		}
+
+		// If this object has both 'properties' and 'required', ensure required fields exist in properties
+		if (sanitized.properties && sanitized.required && Array.isArray(sanitized.required)) {
+			const properties = sanitized.properties as Record<string, unknown>;
+			const propertyNames = Object.keys(properties);
+			sanitized.required = (sanitized.required as string[]).filter((field) => propertyNames.includes(field));
+		}
+
+		return sanitized;
+	}
+
+	return schema;
+}
+
 /**
  * Helper class to validate and correct generation configurations for different Gemini models.
  * Handles model-specific limitations and provides sensible defaults.
@@ -193,24 +265,13 @@ export class GenerationConfigValidator {
 		// Add tools configuration if provided
 		if (Array.isArray(options.tools) && options.tools.length > 0) {
 			const functionDeclarations = options.tools.map((tool) => {
-				let parameters = tool.function.parameters;
-				// Filter parameters for Claude-style compatibility by removing keys starting with '$'
-				if (parameters) {
-					const before = parameters;
-					parameters = Object.keys(parameters)
-						.filter((key) => !key.startsWith("$"))
-						.reduce(
-							(after, key) => {
-								after[key] = before[key];
-								return after;
-							},
-							{} as Record<string, unknown>
-						);
-				}
+				// Recursively sanitize parameters to remove unsupported JSON Schema keys
+				const sanitizedParameters = sanitizeSchemaForGemini(tool.function.parameters);
+
 				return {
 					name: tool.function.name,
 					description: tool.function.description,
-					parameters
+					parameters: sanitizedParameters
 				};
 			});
 
@@ -243,10 +304,18 @@ export class GenerationConfigValidator {
 	} {
 		if (config.useCustomTools && config.customTools && config.customTools.length > 0) {
 			const { toolConfig } = this.createValidateTools(options);
+
+			// Sanitize each function's parameters before sending to Gemini
+			const sanitizedFunctionDeclarations = config.customTools.map((t) => ({
+				name: t.function.name,
+				description: t.function.description,
+				parameters: sanitizeSchemaForGemini(t.function.parameters)
+			}));
+
 			return {
 				tools: [
 					{
-						functionDeclarations: config.customTools.map((t) => t.function)
+						functionDeclarations: sanitizedFunctionDeclarations
 					}
 				],
 				toolConfig: toolConfig

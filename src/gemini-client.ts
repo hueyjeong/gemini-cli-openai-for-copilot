@@ -296,6 +296,50 @@ export class GeminiApiClient {
 	}
 
 	/**
+	 * Converts OpenAI messages to Gemini format and merges consecutive tool responses.
+	 * Gemini requires that function call and function response counts match exactly.
+	 */
+	private convertAndMergeMessages(messages: ChatMessage[]): GeminiFormattedMessage[] {
+		const result: GeminiFormattedMessage[] = [];
+		let i = 0;
+
+		while (i < messages.length) {
+			const msg = messages[i];
+
+			// Check if this is a tool response message
+			if (msg.role === "tool") {
+				// Collect all consecutive tool responses into one user message
+				const toolResponseParts: GeminiPart[] = [];
+
+				while (i < messages.length && messages[i].role === "tool") {
+					const toolMsg = messages[i];
+					toolResponseParts.push({
+						functionResponse: {
+							name: toolMsg.tool_call_id || "unknown_function",
+							response: {
+								result: typeof toolMsg.content === "string" ? toolMsg.content : JSON.stringify(toolMsg.content)
+							}
+						}
+					});
+					i++;
+				}
+
+				// Add merged tool responses as a single user message
+				result.push({
+					role: "user",
+					parts: toolResponseParts
+				});
+			} else {
+				// Regular message - convert normally
+				result.push(this.messageToGeminiFormat(msg));
+				i++;
+			}
+		}
+
+		return result;
+	}
+
+	/**
 	 * Stream content from Gemini API.
 	 */
 	async *streamContent(
@@ -322,7 +366,8 @@ export class GeminiApiClient {
 		await this.authManager.initializeAuth();
 		const projectId = await this.discoverProjectId();
 
-		const contents = messages.map((msg) => this.messageToGeminiFormat(msg));
+		// Convert messages and merge consecutive tool responses
+		const contents = this.convertAndMergeMessages(messages);
 
 		if (systemPrompt) {
 			contents.unshift({ role: "user", parts: [{ text: systemPrompt }] });
