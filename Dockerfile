@@ -48,9 +48,9 @@ RUN mkdir -p .mf && chown -R worker:nodejs /app
 # Expose the port the server will run on
 EXPOSE 8787
 
-# Health check - fast startup detection
-# start-period: 10s grace, interval: 3s rapid check, timeout: 3s
-HEALTHCHECK --interval=3s --timeout=3s --start-period=10s --retries=3 \
+# Health check
+# start-period: 10s grace, interval: 30s check, timeout: 10s
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:8787/health || exit 1
 
 # Use entrypoint script to configure proxy

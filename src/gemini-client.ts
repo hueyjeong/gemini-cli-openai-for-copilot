@@ -43,6 +43,7 @@ interface GeminiResponse {
 export interface GeminiPart {
 	text?: string;
 	thought?: boolean; // For real thinking chunks from Gemini
+	thoughtSignature?: string; // For thought signature validation (Gemini 3 Pro requirement)
 	functionCall?: {
 		name: string;
 		args: object;
@@ -197,7 +198,7 @@ export class GeminiApiClient {
 			};
 		}
 
-		// Handle assistant messages with tool calls
+		// Handle assistant messages with tool calls - REQUIRES thought_signature
 		if (msg.role === "assistant" && msg.tool_calls && msg.tool_calls.length > 0) {
 			const parts: GeminiPart[] = [];
 
@@ -206,23 +207,28 @@ export class GeminiApiClient {
 				parts.push({ text: msg.content });
 			}
 
-			// Add function calls
+			// Add function calls with thought_signature skip validator
+			// Gemini 3 Pro requires thought_signature for function calls in multi-turn conversations
+			// Since we don't have the original signature from external sources (LiteLLM/OpenAI format),
+			// we use skip_thought_signature_validator as recommended by Google docs
 			for (const toolCall of msg.tool_calls) {
 				if (toolCall.type === "function") {
-					parts.push({
+					const part: GeminiPart = {
 						functionCall: {
 							name: toolCall.function.name,
 							args: JSON.parse(toolCall.function.arguments)
-						}
-					});
+						},
+						thoughtSignature: "skip_thought_signature_validator"
+					};
+					parts.push(part);
 				}
 			}
 
 			return { role: "model", parts };
 		}
 
+		// Simple text message - NO thought_signature needed (per Google docs)
 		if (typeof msg.content === "string") {
-			// Simple text message
 			return {
 				role,
 				parts: [{ text: msg.content }]
