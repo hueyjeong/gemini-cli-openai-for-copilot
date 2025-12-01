@@ -81,4 +81,42 @@ app.get("/health", (c) => {
 	return c.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+// IP check endpoint - fetches public IP from ifconfig.me to verify proxy is working
+app.get("/ip", async (c) => {
+	try {
+		const proxyUrl = c.env.HTTP_PROXY;
+
+		// redsocks handles transparent proxying at network level
+		// so we just do a normal fetch and the proxy will intercept it
+		// Using HTTPS with Google API domain to test proxy for Gemini API calls
+		const response = await fetch("https://api.ipify.org?format=json", {
+			headers: { "User-Agent": "curl/7.64.1" }
+		});
+
+		if (!response.ok) {
+			return c.json({
+				error: "Failed to fetch IP",
+				status: response.status,
+				statusText: response.statusText
+			}, 500);
+		}
+
+		const ip = (await response.text()).trim();
+
+		return c.json({
+			ip,
+			timestamp: new Date().toISOString(),
+			proxy: {
+				configured: proxyUrl || "not set"
+			}
+		});
+	} catch (error) {
+		return c.json({
+			error: "Failed to fetch IP",
+			message: error instanceof Error ? error.message : String(error),
+			timestamp: new Date().toISOString()
+		}, 500);
+	}
+});
+
 export default app;

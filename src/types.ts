@@ -35,6 +35,9 @@ export interface Env {
 	ENABLE_INLINE_CITATIONS?: string; // Enable inline citations in responses (default: false)
 	INCLUDE_GROUNDING_METADATA?: string; // Include grounding metadata in responses (default: true)
 	INCLUDE_SEARCH_ENTRY_POINT?: string; // Include search entry point HTML (default: false)
+
+	// HTTP Proxy Configuration (for routing requests through a proxy server)
+	HTTP_PROXY?: string; // HTTP proxy URL (e.g., http://proxy-host:3128)
 }
 
 // --- OAuth2 Credentials Interface ---
@@ -187,13 +190,13 @@ export interface ReasoningData {
 // --- Stream Chunk Types ---
 export interface StreamChunk {
 	type:
-		| "text"
-		| "usage"
-		| "reasoning"
-		| "thinking_content"
-		| "real_thinking"
-		| "tool_code"
-		| "native_tool"
-		| "grounding_metadata";
+	| "text"
+	| "usage"
+	| "reasoning"
+	| "thinking_content"
+	| "real_thinking"
+	| "tool_code"
+	| "native_tool"
+	| "grounding_metadata";
 	data: string | UsageData | ReasoningData | GeminiFunctionCall | NativeToolResponse;
 }
