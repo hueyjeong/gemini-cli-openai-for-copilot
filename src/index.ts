@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import { Env } from "./types";
 import { OpenAIRoute } from "./routes/openai";
+import { GeminiRoute } from "./routes/gemini";
 import { DebugRoute } from "./routes/debug";
-import { openAIApiKeyAuth } from "./middlewares/auth";
+import { openAIApiKeyAuth, geminiApiKeyAuth } from "./middlewares/auth";
 import { loggingMiddleware } from "./middlewares/logging";
 
 /**
@@ -13,6 +14,7 @@ import { loggingMiddleware } from "./middlewares/logging";
  *
  * Features:
  * - OpenAI-compatible chat completions and model listing
+ * - Gemini-native API endpoints for LiteLLM gemini/ prefix support
  * - OAuth2 authentication with token caching via Cloudflare KV
  * - Support for multiple Gemini models (2.5 Pro, 2.0 Flash, 1.5 Pro, etc.)
  * - Streaming responses compatible with OpenAI SDK
@@ -30,7 +32,7 @@ app.use("*", async (c, next) => {
 	// Set CORS headers
 	c.header("Access-Control-Allow-Origin", "*");
 	c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-	c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+	c.header("Access-Control-Allow-Headers", "Content-Type, Authorization, x-goog-api-key");
 
 	// Handle preflight requests
 	if (c.req.method === "OPTIONS") {
@@ -44,28 +46,46 @@ app.use("*", async (c, next) => {
 // Apply OpenAI API key authentication middleware to all /v1 routes
 app.use("/v1/*", openAIApiKeyAuth);
 
+// Apply Gemini API key authentication middleware to /gemini routes
+app.use("/gemini/*", geminiApiKeyAuth);
+
 // Setup route handlers
 app.route("/v1", OpenAIRoute);
 app.route("/v1/debug", DebugRoute);
+app.route("/gemini", GeminiRoute);
 
 // Add individual debug routes to main app for backward compatibility
 app.route("/v1", DebugRoute);
 
 // Root endpoint - basic info about the service
 app.get("/", (c) => {
-	const requiresAuth = !!c.env.OPENAI_API_KEY;
+	const requiresOpenAIAuth = !!c.env.OPENAI_API_KEY;
+	const requiresGeminiAuth = !!c.env.GEMINI_API_KEY;
 
 	return c.json({
 		name: "Gemini CLI OpenAI Worker",
-		description: "OpenAI-compatible API for Google Gemini models via OAuth",
-		version: "1.0.0",
+		description: "OpenAI-compatible and Gemini-native API for Google Gemini models via OAuth",
+		version: "1.1.0",
 		authentication: {
-			required: requiresAuth,
-			type: requiresAuth ? "Bearer token in Authorization header" : "None"
+			openai: {
+				required: requiresOpenAIAuth,
+				type: requiresOpenAIAuth ? "Bearer token in Authorization header" : "None"
+			},
+			gemini: {
+				required: requiresGeminiAuth,
+				type: requiresGeminiAuth ? "x-goog-api-key header or ?key= query parameter" : "None"
+			}
 		},
 		endpoints: {
-			chat_completions: "/v1/chat/completions",
-			models: "/v1/models",
+			openai_compatible: {
+				chat_completions: "/v1/chat/completions",
+				models: "/v1/models"
+			},
+			gemini_native: {
+				models: "/gemini/models",
+				generate_content: "/gemini/models/{model}:generateContent",
+				stream_generate_content: "/gemini/models/{model}:streamGenerateContent"
+			},
 			debug: {
 				cache: "/v1/debug/cache",
 				token_test: "/v1/token-test",

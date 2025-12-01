@@ -19,6 +19,12 @@ import { AutoModelSwitchingHelper } from "./helpers/auto-model-switching";
 import { NativeToolsManager } from "./helpers/native-tools-manager";
 import { CitationsProcessor } from "./helpers/citations-processor";
 import { GeminiUrlContextMetadata, GroundingMetadata, NativeToolsRequestParams } from "./types/native-tools";
+import {
+	GeminiNativeRequest,
+	GeminiNativeResponse,
+	GeminiNativeStreamChunk,
+	GeminiNativePart
+} from "./types/gemini-native";
 
 // Gemini API response types
 interface GeminiCandidate {
@@ -889,5 +895,239 @@ export class GeminiApiClient {
 			return value;
 		}
 		return undefined;
+	}
+
+	// =====================================================
+	// Gemini Native API Methods (for LiteLLM gemini/ prefix)
+	// =====================================================
+
+	/**
+	 * Stream content from Gemini API using native Gemini format.
+	 * This method accepts Gemini-native request format directly and returns
+	 * Gemini-native response format, preserving thought_signature and other fields.
+	 */
+	async *streamContentNative(
+		modelId: string,
+		request: GeminiNativeRequest
+	): AsyncGenerator<GeminiNativeStreamChunk> {
+		await this.authManager.initializeAuth();
+		const projectId = await this.discoverProjectId();
+
+		// Build the request in Code Assist format
+		const streamRequest = this.buildNativeStreamRequest(modelId, projectId, request);
+
+		yield* this.performNativeStreamRequest(streamRequest, modelId);
+	}
+
+	/**
+	 * Get a complete response from Gemini API using native format (non-streaming).
+	 */
+	async getCompletionNative(
+		modelId: string,
+		request: GeminiNativeRequest
+	): Promise<GeminiNativeResponse> {
+		await this.authManager.initializeAuth();
+		const projectId = await this.discoverProjectId();
+
+		// Build the request
+		const streamRequest = this.buildNativeStreamRequest(modelId, projectId, request);
+
+		// Collect all chunks and merge into single response
+		const candidates: GeminiNativeResponse["candidates"] = [];
+		let usageMetadata: GeminiNativeResponse["usageMetadata"] | undefined;
+
+		for await (const chunk of this.performNativeStreamRequest(streamRequest, modelId)) {
+			if (chunk.type === "gemini_native" && chunk.data.candidates) {
+				// Merge parts from streaming chunks
+				for (const candidate of chunk.data.candidates) {
+					if (candidates.length === 0) {
+						candidates.push({
+							content: {
+								role: "model",
+								parts: []
+							}
+						});
+					}
+					if (candidate.content?.parts) {
+						candidates[0].content.parts.push(...(candidate.content.parts as GeminiNativePart[]));
+					}
+					if (candidate.finishReason) {
+						candidates[0].finishReason = candidate.finishReason;
+					}
+					if (candidate.groundingMetadata) {
+						candidates[0].groundingMetadata = candidate.groundingMetadata;
+					}
+				}
+				if (chunk.data.usageMetadata) {
+					usageMetadata = chunk.data.usageMetadata;
+				}
+			}
+		}
+
+		return {
+			candidates,
+			usageMetadata,
+			modelVersion: modelId
+		};
+	}
+
+	/**
+	 * Builds the stream request for native Gemini API format.
+	 */
+	private buildNativeStreamRequest(
+		modelId: string,
+		projectId: string,
+		request: GeminiNativeRequest
+	): Record<string, unknown> {
+		// Build generation config from native format
+		const generationConfig: Record<string, unknown> = {};
+
+		if (request.generationConfig) {
+			const gc = request.generationConfig;
+			if (gc.temperature !== undefined) generationConfig.temperature = gc.temperature;
+			if (gc.topP !== undefined) generationConfig.topP = gc.topP;
+			if (gc.topK !== undefined) generationConfig.topK = gc.topK;
+			if (gc.maxOutputTokens !== undefined) generationConfig.maxOutputTokens = gc.maxOutputTokens;
+			if (gc.stopSequences !== undefined) generationConfig.stopSequences = gc.stopSequences;
+			if (gc.presencePenalty !== undefined) generationConfig.presencePenalty = gc.presencePenalty;
+			if (gc.frequencyPenalty !== undefined) generationConfig.frequencyPenalty = gc.frequencyPenalty;
+			if (gc.seed !== undefined) generationConfig.seed = gc.seed;
+			if (gc.responseMimeType !== undefined) generationConfig.responseMimeType = gc.responseMimeType;
+
+			// Handle thinking config - pass through as-is
+			if (gc.thinkingConfig) {
+				generationConfig.thinkingConfig = gc.thinkingConfig;
+			}
+		}
+
+		// Build contents - pass through directly (native format)
+		const contents = request.contents;
+
+		// Build the request
+		const streamRequest: Record<string, unknown> = {
+			model: modelId,
+			project: projectId,
+			request: {
+				contents
+			}
+		};
+
+		// Add systemInstruction if present (Gemini native format uses separate field)
+		if (request.systemInstruction) {
+			(streamRequest.request as Record<string, unknown>).systemInstruction = request.systemInstruction;
+		}
+
+		// Add generation config if not empty
+		if (Object.keys(generationConfig).length > 0) {
+			(streamRequest.request as Record<string, unknown>).generationConfig = generationConfig;
+		}
+
+		// Add tools if present
+		if (request.tools && request.tools.length > 0) {
+			(streamRequest.request as Record<string, unknown>).tools = request.tools;
+		}
+
+		// Add tool config if present
+		if (request.toolConfig) {
+			(streamRequest.request as Record<string, unknown>).toolConfig = request.toolConfig;
+		}
+
+		// Add safety settings if present, or use env defaults
+		if (request.safetySettings && request.safetySettings.length > 0) {
+			(streamRequest.request as Record<string, unknown>).safetySettings = request.safetySettings;
+		} else {
+			const safetySettings = GenerationConfigValidator.createSafetySettings(this.env);
+			if (safetySettings.length > 0) {
+				(streamRequest.request as Record<string, unknown>).safetySettings = safetySettings;
+			}
+		}
+
+		return streamRequest;
+	}
+
+	/**
+	 * Performs the native stream request and yields Gemini-native format chunks.
+	 * Preserves thought_signature and all other native fields.
+	 */
+	private async *performNativeStreamRequest(
+		streamRequest: Record<string, unknown>,
+		modelId: string,
+		isRetry: boolean = false
+	): AsyncGenerator<GeminiNativeStreamChunk> {
+		const response = await fetch(`${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:streamGenerateContent?alt=sse`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${this.authManager.getAccessToken()}`
+			},
+			body: JSON.stringify(streamRequest)
+		});
+
+		if (!response.ok) {
+			if (response.status === 401 && !isRetry) {
+				console.log("Got 401 error in native stream request, clearing token cache and retrying...");
+				await this.authManager.clearTokenCache();
+				await this.authManager.initializeAuth();
+				yield* this.performNativeStreamRequest(streamRequest, modelId, true);
+				return;
+			}
+
+			// Handle rate limiting with auto model switching
+			if (this.autoSwitchHelper.isRateLimitStatus(response.status) && !isRetry) {
+				const fallbackModel = this.autoSwitchHelper.getFallbackModel(modelId);
+				if (fallbackModel && this.autoSwitchHelper.isEnabled()) {
+					console.log(
+						`Got ${response.status} error for model ${modelId}, switching to fallback model: ${fallbackModel}`
+					);
+
+					const fallbackRequest = {
+						...streamRequest,
+						model: fallbackModel
+					};
+
+					yield* this.performNativeStreamRequest(fallbackRequest, fallbackModel, true);
+					return;
+				}
+			}
+
+			const errorText = await response.text();
+			console.error(`[GeminiAPI Native] Stream request failed: ${response.status}`, errorText);
+			throw new Error(`Stream request failed: ${response.status}`);
+		}
+
+		if (!response.body) {
+			throw new Error("Response has no body");
+		}
+
+		// Parse SSE stream and yield native format chunks
+		for await (const jsonData of this.parseSSEStream(response.body)) {
+			// Convert from Code Assist response format to native Gemini format
+			if (jsonData.response?.candidates) {
+				const nativeResponse: GeminiNativeResponse = {
+					candidates: jsonData.response.candidates.map((candidate) => ({
+						content: {
+							role: "model" as const,
+							parts: (candidate.content?.parts || []) as GeminiNativePart[]
+						},
+						groundingMetadata: candidate.groundingMetadata as Record<string, unknown> | undefined
+					})),
+					usageMetadata: jsonData.response.usageMetadata
+						? {
+							promptTokenCount: jsonData.response.usageMetadata.promptTokenCount || 0,
+							candidatesTokenCount: jsonData.response.usageMetadata.candidatesTokenCount || 0,
+							totalTokenCount:
+								(jsonData.response.usageMetadata.promptTokenCount || 0) +
+								(jsonData.response.usageMetadata.candidatesTokenCount || 0)
+						}
+						: undefined,
+					modelVersion: modelId
+				};
+
+				yield {
+					type: "gemini_native",
+					data: nativeResponse
+				};
+			}
+		}
 	}
 }
