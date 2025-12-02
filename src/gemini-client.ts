@@ -818,7 +818,7 @@ export class GeminiApiClient {
 
 			// Collect all chunks from the stream
 			for await (const chunk of this.streamContent(modelId, systemPrompt, messages, options)) {
-				if (chunk.type === "text" && typeof chunk.data === "string") {
+				if ((chunk.type === "text" || chunk.type === "thinking_content") && typeof chunk.data === "string") {
 					content += chunk.data;
 				} else if (chunk.type === "usage" && typeof chunk.data === "object") {
 					usage = chunk.data as UsageData;
@@ -993,10 +993,26 @@ export class GeminiApiClient {
 			if (gc.frequencyPenalty !== undefined) generationConfig.frequencyPenalty = gc.frequencyPenalty;
 			if (gc.seed !== undefined) generationConfig.seed = gc.seed;
 			if (gc.responseMimeType !== undefined) generationConfig.responseMimeType = gc.responseMimeType;
+		}
 
-			// Handle thinking config - pass through as-is
-			if (gc.thinkingConfig) {
-				generationConfig.thinkingConfig = gc.thinkingConfig;
+		// Force thinkingConfig for thinking models (Gemini 3 Pro, Gemini 2.5 Pro/Flash)
+		// Always use HIGH thinking level to ensure thought: true parts are returned
+		const isThinkingModel = modelId.includes("gemini-3") || modelId.includes("gemini-2.5");
+		if (isThinkingModel) {
+			if (modelId.includes("gemini-3")) {
+				// Gemini 3 uses thinkingLevel
+				generationConfig.thinkingConfig = {
+					thinkingLevel: "HIGH",
+					includeThoughts: true
+				};
+				console.log(`[buildNativeStreamRequest] Forcing thinkingConfig for ${modelId}:`, JSON.stringify(generationConfig.thinkingConfig));
+			} else if (modelId.includes("gemini-2.5")) {
+				// Gemini 2.5 uses thinkingBudget (-1 = dynamic)
+				generationConfig.thinkingConfig = {
+					thinkingBudget: -1,
+					includeThoughts: true
+				};
+				console.log(`[buildNativeStreamRequest] Forcing thinkingConfig for ${modelId}:`, JSON.stringify(generationConfig.thinkingConfig));
 			}
 		}
 
