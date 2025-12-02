@@ -1005,14 +1005,14 @@ export class GeminiApiClient {
 					thinkingLevel: "HIGH",
 					includeThoughts: true
 				};
-				console.log(`[buildNativeStreamRequest] Forcing thinkingConfig for ${modelId}:`, JSON.stringify(generationConfig.thinkingConfig));
+				// console.log(`[buildNativeStreamRequest] Forcing thinkingConfig for ${modelId}:`, JSON.stringify(generationConfig.thinkingConfig));
 			} else if (modelId.includes("gemini-2.5")) {
 				// Gemini 2.5 uses thinkingBudget (-1 = dynamic)
 				generationConfig.thinkingConfig = {
 					thinkingBudget: -1,
 					includeThoughts: true
 				};
-				console.log(`[buildNativeStreamRequest] Forcing thinkingConfig for ${modelId}:`, JSON.stringify(generationConfig.thinkingConfig));
+				// console.log(`[buildNativeStreamRequest] Forcing thinkingConfig for ${modelId}:`, JSON.stringify(generationConfig.thinkingConfig));
 			}
 		}
 
