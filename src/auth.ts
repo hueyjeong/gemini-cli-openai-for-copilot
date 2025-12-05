@@ -13,10 +13,12 @@ import {
 interface TokenRefreshResponse {
 	access_token: string;
 	expires_in: number;
+	refresh_token?: string;
 }
 
 interface CachedTokenData {
 	access_token: string;
+	refresh_token?: string;
 	expiry_date: number;
 	cached_at: number;
 }
@@ -73,7 +75,19 @@ export class AuthManager {
 					console.log(`Using cached token, valid for ${Math.floor(timeUntilExpiry / 1000)} more seconds`);
 					return;
 				}
-				console.log("Cached token expired or expiring soon");
+				console.log("Cached access token expired or expiring soon");
+
+				// Try to refresh using cached refresh token if available
+				if (cachedTokenData.refresh_token) {
+					console.log("Found cached refresh token, attempting to refresh...");
+					try {
+						await this.refreshAndCacheToken(cachedTokenData.refresh_token);
+						return;
+					} catch (refreshError) {
+						console.warn("Failed to refresh using cached refresh token, falling back to env credentials:", refreshError);
+						// Fall through to env credentials
+					}
+				}
 			}
 
 			// Parse original credentials from environment
@@ -87,12 +101,12 @@ export class AuthManager {
 				console.log(`Original token is valid for ${Math.floor(timeUntilExpiry / 1000)} more seconds`);
 
 				// Cache the token in KV storage
-				await this.cacheTokenInKV(oauth2Creds.access_token, oauth2Creds.expiry_date);
+				await this.cacheTokenInKV(oauth2Creds.access_token, oauth2Creds.expiry_date, oauth2Creds.refresh_token);
 				return;
 			}
 
 			// Both original and cached tokens are expired, refresh the token
-			console.log("All tokens expired, refreshing...");
+			console.log("All tokens expired, refreshing using env credentials...");
 			await this.refreshAndCacheToken(oauth2Creds.refresh_token);
 		} catch (e: unknown) {
 			const errorMessage = e instanceof Error ? e.message : String(e);
@@ -135,23 +149,39 @@ export class AuthManager {
 		console.log("Token refreshed successfully");
 		console.log(`New token expires in ${refreshData.expires_in} seconds`);
 
+		// Use new refresh token if provided, otherwise keep using the one we have
+		let nextRefreshToken = refreshToken;
+		if (refreshData.refresh_token) {
+			console.log("Received new refresh token from Google, updating cache...");
+			nextRefreshToken = refreshData.refresh_token;
+		}
+
 		// Cache the new token in KV storage
-		await this.cacheTokenInKV(refreshData.access_token, expiryTime);
+		await this.cacheTokenInKV(refreshData.access_token, expiryTime, nextRefreshToken);
 	}
 
 	/**
-	 * Cache the access token in KV storage.
-	 */
-	private async cacheTokenInKV(accessToken: string, expiryDate: number): Promise<void> {
+		* Cache the access token in KV storage.
+		*/
+	private async cacheTokenInKV(accessToken: string, expiryDate: number, refreshToken?: string): Promise<void> {
 		try {
-			const tokenData = {
+			const tokenData: CachedTokenData = {
 				access_token: accessToken,
+				refresh_token: refreshToken,
 				expiry_date: expiryDate,
 				cached_at: Date.now()
 			};
 
-			// Cache for slightly less than the token expiry to be safe
-			const ttlSeconds = Math.floor((expiryDate - Date.now()) / 1000) - 300; // 5 minutes buffer
+			// Calculate TTL
+			let ttlSeconds: number;
+
+			if (refreshToken) {
+				// If we have a refresh token, keep the cache for 30 days
+				ttlSeconds = 30 * 24 * 60 * 60; // 30 days
+			} else {
+				// Otherwise, cache for slightly less than the token expiry
+				ttlSeconds = Math.floor((expiryDate - Date.now()) / 1000) - 300; // 5 minutes buffer
+			}
 
 			if (ttlSeconds > 0) {
 				await this.env.GEMINI_CLI_KV.put(KV_TOKEN_KEY, JSON.stringify(tokenData), {
