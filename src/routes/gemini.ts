@@ -156,34 +156,6 @@ GeminiRoute.post("/models/:modelAction", async (c) => {
             );
         }
 
-        // Validate and normalize roles to Gemini format (user/model only)
-        for (const content of body.contents) {
-            // If role is not specified, default to 'user' (common for single-turn requests)
-            if (!content.role) {
-                content.role = "user";
-            } else if (content.role !== "user" && content.role !== "model") {
-                // Convert assistant -> model, system -> user (first message)
-                if (content.role === "assistant") {
-                    content.role = "model";
-                } else if (content.role === "system") {
-                    content.role = "user";
-                } else {
-                    // Invalid role - log and reject
-                    console.error(`Invalid role in contents: ${content.role}`);
-                    return c.json(
-                        {
-                            error: {
-                                code: 400,
-                                message: `Invalid role: ${content.role}. Only 'user' and 'model' are allowed in Gemini native format.`,
-                                status: "INVALID_ARGUMENT"
-                            }
-                        },
-                        400
-                    );
-                }
-            }
-        }
-
         // Initialize services
         const authManager = new AuthManager(c.env);
         const geminiClient = new GeminiApiClient(c.env, authManager);
@@ -209,91 +181,36 @@ GeminiRoute.post("/models/:modelAction", async (c) => {
 
         if (isStreaming) {
             // Streaming response
-            try {
-                const nativeStream = geminiClient.streamContentNative(modelId, body);
-                const iterator = nativeStream[Symbol.asyncIterator]();
+            const { readable, writable } = new TransformStream();
+            const writer = writable.getWriter();
+            const geminiTransformer = createGeminiNativeStreamTransformer();
+            const geminiStream = readable.pipeThrough(geminiTransformer);
 
-                // Await the first chunk to ensure the upstream request is successful
-                // This prevents sending 200 OK when the upstream actually failed (e.g. 429, 401)
-                const firstResult = await iterator.next();
+            // Asynchronously pipe data from Gemini to transformer
+            (async () => {
+                try {
+                    const nativeStream = geminiClient.streamContentNative(modelId, body);
 
-                if (firstResult.done) {
-                    return c.json(
-                        {
-                            error: {
-                                code: 500,
-                                message: "Empty response from Gemini API",
-                                status: "INTERNAL"
-                            }
-                        },
-                        500
-                    );
-                }
-
-                const { readable, writable } = new TransformStream();
-                const writer = writable.getWriter();
-                const geminiTransformer = createGeminiNativeStreamTransformer();
-                const geminiStream = readable.pipeThrough(geminiTransformer);
-
-                // Write the first chunk we already received
-                await writer.write(firstResult.value);
-
-                // Continue processing the rest of the stream in the background
-                (async () => {
-                    try {
-                        let result = await iterator.next();
-                        while (!result.done) {
-                            await writer.write(result.value);
-                            result = await iterator.next();
-                        }
-                        await writer.close();
-                    } catch (streamError: unknown) {
-                        const errorMessage = streamError instanceof Error ? streamError.message : String(streamError);
-                        console.error("Gemini native stream error:", errorMessage);
-                        // We can't change the status code anymore, but we can close the stream
-                        await writer.close();
+                    for await (const chunk of nativeStream) {
+                        await writer.write(chunk);
                     }
-                })();
-
-                // Return streaming response
-                return new Response(geminiStream, {
-                    headers: {
-                        "Content-Type": "text/event-stream",
-                        "Cache-Control": "no-cache",
-                        Connection: "keep-alive",
-                        "Access-Control-Allow-Origin": "*"
-                    }
-                });
-            } catch (e: unknown) {
-                // Handle errors that occurred during the initial connection/first chunk
-                const errorMessage = e instanceof Error ? e.message : String(e);
-                console.error("Gemini native initial stream error:", errorMessage);
-
-                let status = 500;
-                let statusText = "INTERNAL";
-
-                if (errorMessage.includes("429")) {
-                    status = 429;
-                    statusText = "RESOURCE_EXHAUSTED";
-                } else if (errorMessage.includes("401") || errorMessage.includes("403")) {
-                    status = 401;
-                    statusText = "UNAUTHENTICATED";
-                } else if (errorMessage.includes("404")) {
-                    status = 404;
-                    statusText = "NOT_FOUND";
+                    await writer.close();
+                } catch (streamError: unknown) {
+                    const errorMessage = streamError instanceof Error ? streamError.message : String(streamError);
+                    console.error("Gemini native stream error:", errorMessage);
+                    await writer.close();
                 }
+            })();
 
-                return c.json(
-                    {
-                        error: {
-                            code: status,
-                            message: errorMessage,
-                            status: statusText
-                        }
-                    },
-                    status as any
-                );
-            }
+            // Return streaming response
+            return new Response(geminiStream, {
+                headers: {
+                    "Content-Type": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                    Connection: "keep-alive",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            });
         } else {
             // Non-streaming response
             const completion = await geminiClient.getCompletionNative(modelId, body);

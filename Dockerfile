@@ -39,18 +39,26 @@ RUN --mount=type=cache,target=/root/.yarn \
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
+# Pre-create directories as worker user BEFORE copying files
+RUN mkdir -p /app/.mf /app/.tmp
+
 # Copy the rest of your application code
 COPY --chown=worker:nodejs . .
 
-# Create app directories with proper ownership in single layer
-RUN mkdir -p .mf && chown -R worker:nodejs /app
+# Change ownership: /app itself (no -R), then subdirectories except node_modules
+# Only chown directories that exist and need write access
+RUN chown worker:nodejs /app /app/node_modules && \
+    chown -R worker:nodejs /app/.mf /app/.tmp /app/src
+
+# Set TMPDIR to use app-local temp directory (worker has permission)
+ENV TMPDIR=/app/.tmp
 
 # Expose the port the server will run on
 EXPOSE 8787
 
 # Health check
-# start-period: 10s grace, interval: 30s check, timeout: 10s
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+# start-period: 10s grace, interval: 120s check, timeout: 10s
+HEALTHCHECK --interval=120s --timeout=10s --start-period=10s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:8787/health || exit 1
 
 # Use entrypoint script to configure proxy
