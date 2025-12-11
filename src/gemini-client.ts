@@ -31,6 +31,7 @@ interface GeminiCandidate {
 	content?: {
 		parts?: Array<{ text?: string }>;
 	};
+	finishReason?: string;
 	groundingMetadata?: GroundingMetadata;
 }
 
@@ -769,6 +770,13 @@ export class GeminiApiClient {
 				}
 			}
 
+			if (candidate?.finishReason) {
+				yield {
+					type: "finish_reason",
+					data: candidate.finishReason
+				};
+			}
+
 			if (jsonData.response?.usageMetadata) {
 				const usage = jsonData.response.usageMetadata;
 				const usageData: UsageData = {
@@ -1125,6 +1133,7 @@ export class GeminiApiClient {
 							role: "model" as const,
 							parts: (candidate.content?.parts || []) as GeminiNativePart[]
 						},
+						finishReason: candidate.finishReason as any,
 						groundingMetadata: candidate.groundingMetadata as Record<string, unknown> | undefined
 					})),
 					usageMetadata: jsonData.response.usageMetadata

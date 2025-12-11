@@ -198,6 +198,7 @@ export interface StreamChunk {
 	| "real_thinking"
 	| "tool_code"
 	| "native_tool"
-	| "grounding_metadata";
+	| "grounding_metadata"
+	| "finish_reason";
 	data: string | UsageData | ReasoningData | GeminiFunctionCall | NativeToolResponse;
 }

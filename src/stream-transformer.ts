@@ -88,7 +88,9 @@ export function createOpenAIStreamTransformer(model: string): TransformStream<St
 	const encoder = new TextEncoder();
 	let firstChunk = true;
 	let toolCallId: string | null = null;
+	let finishReason: string | null = null;
 	let toolCallName: string | null = null;
+	let toolCallIndex = 0;
 	let usageData: UsageData | undefined;
 
 	return new TransformStream({
@@ -121,10 +123,12 @@ export function createOpenAIStreamTransformer(model: string): TransformStream<St
 					if (isGeminiFunctionCall(chunk.data)) {
 						const toolData = chunk.data;
 						toolCallName = toolData.name;
+						// Always generate a new ID for each tool call chunk as they are distinct calls
 						toolCallId = `call_${crypto.randomUUID()}`;
+
 						delta.tool_calls = [
 							{
-								index: 0,
+								index: toolCallIndex,
 								id: toolCallId,
 								type: "function",
 								function: {
@@ -133,6 +137,8 @@ export function createOpenAIStreamTransformer(model: string): TransformStream<St
 								}
 							}
 						];
+						toolCallIndex++; // Increment index for potential subsequent tool calls
+
 						if (firstChunk) {
 							delta.role = "assistant";
 							delta.content = null;
@@ -150,6 +156,11 @@ export function createOpenAIStreamTransformer(model: string): TransformStream<St
 						delta.grounding = chunk.data;
 					}
 					break;
+				case "finish_reason":
+					if (typeof chunk.data === "string") {
+						finishReason = chunk.data;
+					}
+					return;
 				case "usage":
 					if (isUsageData(chunk.data)) {
 						usageData = chunk.data;
@@ -178,13 +189,24 @@ export function createOpenAIStreamTransformer(model: string): TransformStream<St
 			}
 		},
 		flush(controller) {
-			const finishReason = toolCallId ? "tool_calls" : "stop";
+			let finalFinishReason = "stop";
+			if (finishReason) {
+				if (finishReason === "STOP") finalFinishReason = "stop";
+				else if (finishReason === "MAX_TOKENS") finalFinishReason = "length";
+				else if (finishReason === "SAFETY") finalFinishReason = "content_filter";
+				else if (finishReason === "RECITATION") finalFinishReason = "content_filter";
+			}
+
+			if (toolCallId) {
+				finalFinishReason = "tool_calls";
+			}
+
 			const finalChunk: OpenAIFinalChunk = {
 				id: chatID,
 				object: OPENAI_CHAT_COMPLETION_OBJECT,
 				created: creationTime,
 				model: model,
-				choices: [{ index: 0, delta: {}, finish_reason: finishReason }]
+				choices: [{ index: 0, delta: {}, finish_reason: finalFinishReason }]
 			};
 
 			if (usageData) {
